@@ -4,49 +4,49 @@ import os
 import time
 import numpy as np
 import pandas as pd
+import tensorflow as tf
 import tensorflow.compat.v1 as tf
+from tensorflow_estimator.python.estimator.canned import linear
 from tensorflow import feature_column as fc
 from base_comm import ACTION_LIST, STAGE_END_DAY, FEA_COLUMN_LIST
 from base_evaluation import uAUC, compute_weighted_score
-
 flags = tf.app.flags
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('model_checkpoint_dir', './data/model', 'model dir')
 flags.DEFINE_string('root_path', '../data/', 'data dir')
-flags.DEFINE_integer('batch_size', 128, 'batch_size')
-flags.DEFINE_integer('embed_dim', 10, 'embed_dim')
+flags.DEFINE_integer('batch_size', 32, 'batch_size')
+flags.DEFINE_integer('embed_dim', 32, 'embed_dim')
 flags.DEFINE_float('learning_rate', 0.1, 'learning_rate')
 flags.DEFINE_float('embed_l2', None, 'embedding l2 reg')
 
 SEED = 2021
 
+class MMOE(object):
 
-class WideAndDeep(object):
-
-    def __init__(self, linear_feature_columns, dnn_feature_columns, stage, action):
+    def __init__(self, linear_feature_columns, dnn_feature_columns, stage):
         """
         :param linear_feature_columns: List of tensorflow feature_column
         :param dnn_feature_columns: List of tensorflow feature_column
         :param stage: String. Including "online_train"/"offline_train"/"evaluate"/"submit"
-        :param action: String. Including "read_comment"/"like"/"click_avatar"/"favorite"/"forward"/"comment"/"follow"
         """
-        super(WideAndDeep, self).__init__()
-        self.num_epochs_dict = {"read_comment": 4, "like": 3, "click_avatar": 2, "favorite": 1, "forward": 2,
+        super(MMOE, self).__init__()
+        self.action_weight = {"read_comment": 4, "like": 3, "click_avatar": 2, "favorite": 1, "forward": 2,
                                 "comment": 1, "follow": 1}
         self.estimator = None
         self.linear_feature_columns = linear_feature_columns
         self.dnn_feature_columns = dnn_feature_columns
         self.stage = stage
-        self.action = action
         tf.logging.set_verbosity(tf.logging.INFO)
+
+
 
     def build_estimator(self):
         if self.stage in ["evaluate", "offline_train"]:
             stage = "offline_train"
         else:
             stage = "online_train"
-        model_checkpoint_stage_dir = os.path.join(FLAGS.model_checkpoint_dir, stage, self.action)
+        model_checkpoint_stage_dir = os.path.join(FLAGS.model_checkpoint_dir, stage, 'mmoe')
         if not os.path.exists(model_checkpoint_stage_dir):
             # 如果模型目录不存在，则创建该目录
             os.makedirs(model_checkpoint_stage_dir)
@@ -56,20 +56,71 @@ class WideAndDeep(object):
         optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.learning_rate, beta1=0.9, beta2=0.999,
                                            epsilon=1)
         config = tf.estimator.RunConfig(model_dir=model_checkpoint_stage_dir, tf_random_seed=SEED)
-        self.estimator = tf.estimator.DNNLinearCombinedClassifier(
-            model_dir=model_checkpoint_stage_dir,
-            linear_feature_columns=self.linear_feature_columns,
-            dnn_feature_columns=self.dnn_feature_columns,
-            dnn_hidden_units=[32, 8],
-            dnn_optimizer=optimizer,
-            config=config)
+        self.estimator = tf.estimator.Estimator(model_fn=self.model_fn, params = {'model_dir': model_checkpoint_stage_dir,
+                                                                'linear_feature_columns': self.linear_feature_columns,
+                                                                'dnn_feature_columns': self.dnn_feature_columns,
+                                                                'dnn_hidden_units': [32, 8],
+                                                                'dnn_optimizer': optimizer,
+                                                                 'actions': 4},
+                                                                config = config)
 
-    def df_to_dataset(self, df, stage, action, shuffle=True, batch_size=128, num_epochs=1):
+    def model_fn(self,
+                 features, # This is batch_features from input_fn
+                 labels,   # This is batch_labels from input_fn
+                 mode,     # An instance of tf.estimator.ModeKeys
+                 params):
+        # Use `input_layer` to apply the feature columns.
+        dnn_logits_actions = list()
+        for action_i in range(params['actions']):
+            dnn_net = tf.feature_column.input_layer(features, params['dnn_feature_columns'])
+            #shape of dnn_net (50)
+            for unit in params['dnn_hidden_units']:
+                dnn_net = tf.layers.dense(dnn_net, units=unit, activation=tf.nn.relu)
+            dnn_logits_action = tf.layers.dense(dnn_net, 1, activation=None)
+            dnn_logits_actions.append(dnn_logits_action)
+        dnn_logits = tf.concat(dnn_logits_actions, -1)
+
+        linear_logits_actions = list()
+        for action_i in range(params['actions']):
+            linear_net = tf.feature_column.input_layer(features, params['linear_feature_columns'])
+            #shape of linear_net (16)
+            # logit_fn = linear._linear_logit_fn_builder(
+            #     units=1,
+            #     feature_columns=linear_feature_columns,
+            #     sparse_combiner=linear_sparse_combiner)
+            # linear_logits = logit_fn(features=features)
+
+            linear_logits_action = tf.layers.dense(linear_net, 1, activation = None)
+            linear_logits_actions.append(linear_logits_action)
+        linear_logits = tf.concat(linear_logits_actions, -1)
+        logits = tf.sigmoid(dnn_logits + linear_logits)
+        weights = tf.constant([0.4,0.3,0.2,0.1])
+        if mode == tf.estimator.ModeKeys.PREDICT:
+            spec = tf.estimator.EstimatorSpec(mode=mode,
+                                          predictions=logits)
+        else:
+            loss = -tf.reduce_sum(
+                tf.matmul(
+                tf.multiply(tf.to_float(labels), tf.log(logits+1e-8))
+                + tf.multiply(1.0 - tf.to_float(labels), tf.log(1.0 - logits+1e-8))), weights)
+            optimizer = params['dnn_optimizer']
+            train_op = optimizer.minimize(
+                loss=loss, global_step=tf.train.get_global_step())
+            metrics = dict()
+            spec = tf.estimator.EstimatorSpec(
+                mode=mode,
+                loss=loss,
+                train_op=train_op,
+                eval_metric_ops=metrics)
+        return spec
+
+
+
+    def df_to_dataset(self, df, stage, shuffle=True, batch_size=128, num_epochs=1):
         '''
         把DataFrame转为tensorflow dataset
         :param df: pandas dataframe.
         :param stage: String. Including "online_train"/"offline_train"/"evaluate"/"submit"
-        :param action: String. Including "read_comment"/"like"/"click_avatar"/"favorite"/"forward"/"comment"/"follow"
         :param shuffle: Boolean.
         :param batch_size: Int. Size of each batch
         :param num_epochs: Int. Epochs num
@@ -80,7 +131,7 @@ class WideAndDeep(object):
         print("batch_size: ", batch_size)
         print("num_epochs: ", num_epochs)
         if stage != "submit":
-            label = df[action]
+            label = df[ACTION_LIST]
             ds = tf.data.Dataset.from_tensor_slices((dict(df), label))
         else:
             ds = tf.data.Dataset.from_tensor_slices((dict(df)))
@@ -90,49 +141,44 @@ class WideAndDeep(object):
         if stage in ["online_train", "offline_train"]:
             ds = ds.repeat(num_epochs)
         return ds
-
-    def input_fn_train(self, df, stage, action, num_epochs):
-        return self.df_to_dataset(df, stage, action, shuffle=True, batch_size=FLAGS.batch_size,
+    def input_fn_train(self, df, stage, num_epochs):
+        return self.df_to_dataset(df, stage, shuffle=True, batch_size=FLAGS.batch_size,
                                   num_epochs=num_epochs)
-
-    def input_fn_predict(self, df, stage, action):
-        return self.df_to_dataset(df, stage, action, shuffle=False, batch_size=len(df), num_epochs=1)
+    def input_fn_predict(self, df, stage):
+        return self.df_to_dataset(df, stage, shuffle=False, batch_size=len(df), num_epochs=1)
 
     def train(self):
-        """
-        训练单个行为的模型
-        """
-        file_name = "{stage}_{action}_{day}_concate_sample.csv".format(stage=self.stage, action=self.action,
-                                                                       day=STAGE_END_DAY[self.stage])
+
+        file_name = "{stage}_{action}_{day}_concate_sample.csv".format(stage=self.stage, action='all',
+                                                                   day=STAGE_END_DAY[self.stage])
         stage_dir = os.path.join(FLAGS.root_path, self.stage, file_name)
         df = pd.read_csv(stage_dir)
         self.estimator.train(
-            input_fn=lambda: self.input_fn_train(df, self.stage, self.action, self.num_epochs_dict[self.action])
+            input_fn=lambda: self.input_fn_train(df, self.stage, 1)
         )
-
     def evaluate(self):
         """
         评估单个行为的uAUC值
         """
-        if self.stage in ["online_train", "offline_train"]:
-            # 训练集，每个action一个文件
-            action = self.action
-        else:
-            # 测试集，所有action在同一个文件
-            action = "all"
+        action = "all"
         file_name = "{stage}_{action}_{day}_concate_sample.csv".format(stage=self.stage, action=action,
                                                                        day=STAGE_END_DAY[self.stage])
         evaluate_dir = os.path.join(FLAGS.root_path, self.stage, file_name)
         df = pd.read_csv(evaluate_dir)
         userid_list = df['userid'].astype(str).tolist()
         predicts = self.estimator.predict(
-            input_fn=lambda: self.input_fn_predict(df, self.stage, self.action)
+            input_fn=lambda: self.input_fn_predict(df, self.stage)
         )
         predicts_df = pd.DataFrame.from_dict(predicts)
-        logits = predicts_df["logistic"].map(lambda x: x[0])
-        labels = df[self.action].values
-        uauc = uAUC(labels, logits, userid_list)
-        return df[["userid", "feedid"]], logits, uauc
+        score_dict = dict()
+        predict_dict = dict()
+        for i,action in enumerate(ACTION_LIST):
+            labels = df[action].values
+            uauc = uAUC(labels, predicts_df.values[:, i], userid_list)
+            print(action,uauc)
+            score_dict[action] = uauc
+            predict_dict[action] = predicts_df.values[:, i]
+        return df[["userid", "feedid"]], predict_dict, score_dict
 
     def predict(self):
         '''
@@ -144,13 +190,15 @@ class WideAndDeep(object):
         df = pd.read_csv(submit_dir)
         t = time.time()
         predicts = self.estimator.predict(
-            input_fn=lambda: self.input_fn_predict(df, self.stage, self.action)
+            input_fn=lambda: self.input_fn_predict(df, self.stage)
         )
         predicts_df = pd.DataFrame.from_dict(predicts)
-        logits = predicts_df["logistic"].map(lambda x: x[0])
+        predict_dict = dict()
+        for i, action in enumerate(ACTION_LIST):
+            predict_dict[action] = predicts_df.values[:, i]
         # 计算2000条样本平均预测耗时（毫秒）
         ts = (time.time() - t) * 1000.0 / len(df) * 2000.0
-        return df[["userid", "feedid"]], logits, ts
+        return df[["userid", "feedid"]], predict_dict, ts
 
 
 def del_file(path):
@@ -212,28 +260,26 @@ def main(argv):
     predict_dict = {}
     predict_time_cost = {}
     ids = None
-    for action in ACTION_LIST:
-        print("Action:", action)
-        model = WideAndDeep(linear_feature_columns, dnn_feature_columns, stage, action)
-        model.build_estimator()
+    model = MMOE(linear_feature_columns, dnn_feature_columns, stage)
+    model.build_estimator()
 
-        if stage in ["online_train", "offline_train"]:
-            # 训练 并评估
-            model.train()
-            ids, logits, action_uauc = model.evaluate()
-            eval_dict[action] = action_uauc
+    if stage in ["online_train", "offline_train"]:
+        # 训练 并评估
+        model.train()
+        ids, logits, action_uauc = model.evaluate()
+        eval_dict = action_uauc
 
-        if stage == "evaluate":
-            # 评估线下测试集结果，计算单个行为的uAUC值，并保存预测结果
-            ids, logits, action_uauc = model.evaluate()
-            eval_dict[action] = action_uauc
-            predict_dict[action] = logits
+    if stage == "evaluate":
+        # 评估线下测试集结果，计算单个行为的uAUC值，并保存预测结果
+        ids, logits, action_uauc = model.evaluate()
+        eval_dict = action_uauc
+        predict_dict = logits
 
-        if stage == "submit":
-            # 预测线上测试集结果，保存预测结果
-            ids, logits, ts = model.predict()
-            predict_time_cost[action] = ts
-            predict_dict[action] = logits
+    if stage == "submit":
+        # 预测线上测试集结果，保存预测结果
+        ids, logits, ts = model.predict()
+        predict_time_cost = ts
+        predict_dict= logits
 
     if stage in ["evaluate", "offline_train", "online_train"]:
         # 计算所有行为的加权uAUC

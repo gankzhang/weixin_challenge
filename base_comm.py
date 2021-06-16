@@ -29,6 +29,7 @@ ACTION_LIST = ["read_comment", "like", "click_avatar",  "forward"]
 FEA_COLUMN_LIST = ["read_comment", "like", "click_avatar",  "forward", "comment", "follow", "favorite"]
 # 每个行为的负样本下采样比例(下采样后负样本数/原负样本数)
 ACTION_SAMPLE_RATE = {"read_comment": 0.2, "like": 0.2, "click_avatar": 0.2, "forward": 0.1, "comment": 0.1, "follow": 0.1, "favorite": 0.1}
+# ACTION_SAMPLE_RATE = {"read_comment": 1, "like": 1, "click_avatar": 1, "forward": 1, "comment": 1, "follow": 1, "favorite": 1}
 
 # 各个阶段数据集的设置的最后一天
 STAGE_END_DAY = {"online_train": 14, "offline_train": 12, "evaluate": 13, "submit": 15}
@@ -149,13 +150,13 @@ def generate_sample(stage="offline_train"):
             df_pos = action_df[action_df[action] == 1]
             df_neg = df_neg.sample(frac=ACTION_SAMPLE_RATE[action], random_state=SEED, replace=False)
             df_all = pd.concat([df_neg, df_pos])
-            col = ["userid", "feedid", "date_", "device"] + [action]
+            # col = ["userid", "feedid", "date_", "device"] + [action]
+            col = ["userid", "feedid", "date_", "device"] + ACTION_LIST
             file_name = os.path.join(stage_dir, stage + "_" + action + "_" + str(day) + "_generate_sample.csv")
             print('Save to: %s'%file_name)
             df_all[col].to_csv(file_name, index=False)
             df_arr.append(df_all[col])
     return df_arr
-
 
 def concat_sample(sample_arr, stage="offline_train"):
     """
@@ -209,6 +210,31 @@ def concat_sample(sample_arr, stage="offline_train"):
             sample[["authorid", "bgm_song_id", "bgm_singer_id"]].astype(int)
         file_name = os.path.join(ROOT_PATH, stage, stage + "_" + action + "_" + str(day) + "_concate_sample.csv")
         print('Save to: %s'%file_name)
+        sample[features].to_csv(file_name, index=False)
+    if stage in ['online_train', 'offline_train']:
+        features += ACTION_LIST
+        sample = sample_arr[0]
+        sample = sample.join(feed_info, on="feedid", how="left", rsuffix="_feed")
+        sample = sample.join(feed_date_feature, on=["feedid", "date_"], how="left", rsuffix="_feed")
+        sample = sample.join(user_date_feature, on=["userid", "date_"], how="left", rsuffix="_user")
+        feed_feature_col = [b + "sum" for b in FEA_COLUMN_LIST]
+        user_feature_col = [b + "sum_user" for b in FEA_COLUMN_LIST]
+        sample[feed_feature_col] = sample[feed_feature_col].fillna(0.0)
+        sample[user_feature_col] = sample[user_feature_col].fillna(0.0)
+        sample[feed_feature_col] = np.log(sample[feed_feature_col] + 1.0)
+        sample[user_feature_col] = np.log(sample[user_feature_col] + 1.0)
+        features += feed_feature_col
+        features += user_feature_col
+
+        sample[["authorid", "bgm_song_id", "bgm_singer_id"]] += 1  # 0 用于填未知
+        sample[["authorid", "bgm_song_id", "bgm_singer_id", "videoplayseconds"]] = \
+            sample[["authorid", "bgm_song_id", "bgm_singer_id", "videoplayseconds"]].fillna(0)
+        sample["videoplayseconds"] = np.log(sample["videoplayseconds"] + 1.0)
+
+        sample[["authorid", "bgm_song_id", "bgm_singer_id"]] = \
+            sample[["authorid", "bgm_song_id", "bgm_singer_id"]].astype(int)
+        file_name = os.path.join(ROOT_PATH, stage, stage + "_" + 'all' + "_" + str(day) + "_concate_sample.csv")
+        print('Save to: %s' % file_name)
         sample[features].to_csv(file_name, index=False)
 
 

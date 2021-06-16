@@ -42,7 +42,6 @@ class WideAndDeep(object):
         self.stage = stage
         self.action = action
         tf.logging.set_verbosity(tf.logging.INFO)
-
     def build_estimator(self):
         if self.stage in ["evaluate", "offline_train"]:
             stage = "offline_train"
