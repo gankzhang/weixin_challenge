@@ -6,7 +6,13 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 import tensorflow.compat.v1 as tf
-from tensorflow_estimator.python.estimator.canned import linear
+from tensorflow.python.framework import ops
+from tensorflow.python.ops import state_ops
+
+from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.training import training_util
+
+from tensorflow_estimator.python.estimator.canned import linear,dnn
 from tensorflow import feature_column as fc
 from base_comm import ACTION_LIST, STAGE_END_DAY, FEA_COLUMN_LIST
 from base_evaluation import uAUC, compute_weighted_score
@@ -15,8 +21,8 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('model_checkpoint_dir', './data/model', 'model dir')
 flags.DEFINE_string('root_path', '../data/', 'data dir')
-flags.DEFINE_integer('batch_size', 32, 'batch_size')
-flags.DEFINE_integer('embed_dim', 32, 'embed_dim')
+flags.DEFINE_integer('batch_size', 128, 'batch_size')
+flags.DEFINE_integer('embed_dim', 10, 'embed_dim')
 flags.DEFINE_float('learning_rate', 0.1, 'learning_rate')
 flags.DEFINE_float('embed_l2', None, 'embedding l2 reg')
 
@@ -40,7 +46,6 @@ class MMOE(object):
         tf.logging.set_verbosity(tf.logging.INFO)
 
 
-
     def build_estimator(self):
         if self.stage in ["evaluate", "offline_train"]:
             stage = "offline_train"
@@ -53,6 +58,7 @@ class MMOE(object):
         elif self.stage in ["online_train", "offline_train"]:
             # 训练时如果模型目录已存在，则清空目录
             del_file(model_checkpoint_stage_dir)
+            pass
         optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.learning_rate, beta1=0.9, beta2=0.999,
                                            epsilon=1)
         config = tf.estimator.RunConfig(model_dir=model_checkpoint_stage_dir, tf_random_seed=SEED)
@@ -61,7 +67,8 @@ class MMOE(object):
                                                                 'dnn_feature_columns': self.dnn_feature_columns,
                                                                 'dnn_hidden_units': [32, 8],
                                                                 'dnn_optimizer': optimizer,
-                                                                 'actions': 4},
+                                                                 'actions': 4,
+                                                                 'experts':5},
                                                                 config = config)
 
     def model_fn(self,
@@ -70,42 +77,77 @@ class MMOE(object):
                  mode,     # An instance of tf.estimator.ModeKeys
                  params):
         # Use `input_layer` to apply the feature columns.
-        dnn_logits_actions = list()
-        for action_i in range(params['actions']):
-            dnn_net = tf.feature_column.input_layer(features, params['dnn_feature_columns'])
-            #shape of dnn_net (50)
-            for unit in params['dnn_hidden_units']:
-                dnn_net = tf.layers.dense(dnn_net, units=unit, activation=tf.nn.relu)
-            dnn_logits_action = tf.layers.dense(dnn_net, 1, activation=None)
-            dnn_logits_actions.append(dnn_logits_action)
-        dnn_logits = tf.concat(dnn_logits_actions, -1)
+        with tf.variable_scope('dnn') as scope:
+            dnn_scope = scope.name
+            dnn_logits_experts = list()
+            for action_i in range(params['experts']):
+                dnn_net = tf.feature_column.input_layer(features, params['dnn_feature_columns'])
+                #shape of dnn_net (50)
+                for unit in params['dnn_hidden_units']:
+                    dnn_net = tf.layers.dense(dnn_net, units=unit, activation=tf.nn.relu)
+                dnn_logits_expert = tf.layers.dense(dnn_net, 1, activation=None)
+                dnn_logits_experts.append(dnn_logits_expert)
+            dnn_logits = tf.concat(dnn_logits_experts, -1)
+            # dnn_logit_fn = dnn.dnn_logit_fn_builder(
+            #     units=head.logits_dimension,
+            #     hidden_units=params['dnn_hidden_units'],
+            #     feature_columns=params['dnn_feature_columns'],
+            #     activation_fn=tf.nn.relu,
+            #     dropout=None,
+            #     batch_norm=False,
+            #     input_layer_partitioner=input_layer_partitioner)
+            # dnn_logits = dnn_logit_fn(features=features, mode=mode)
 
-        linear_logits_actions = list()
-        for action_i in range(params['actions']):
-            linear_net = tf.feature_column.input_layer(features, params['linear_feature_columns'])
-            #shape of linear_net (16)
-            # logit_fn = linear._linear_logit_fn_builder(
-            #     units=1,
-            #     feature_columns=linear_feature_columns,
-            #     sparse_combiner=linear_sparse_combiner)
-            # linear_logits = logit_fn(features=features)
+            gates = tf.Variable(np.zeros((params['experts'], params['actions'])),trainable=True)
+            gates = tf.nn.softmax(gates, 0)
 
-            linear_logits_action = tf.layers.dense(linear_net, 1, activation = None)
-            linear_logits_actions.append(linear_logits_action)
-        linear_logits = tf.concat(linear_logits_actions, -1)
-        logits = tf.sigmoid(dnn_logits + linear_logits)
-        weights = tf.constant([0.4,0.3,0.2,0.1])
+        linear_logits_experts = list()
+        linear_scopes = list()
+        for expert_i in range(params['experts']):
+            with tf.variable_scope(str(expert_i)+'_linear') as scope:
+                linear_scopes.append(scope.name)
+                #shape of linear_net (16)
+                logit_fn = linear.linear_logit_fn_builder(
+                    units=1,
+                    feature_columns=params['linear_feature_columns'],
+                    sparse_combiner='sum')
+                linear_logits_expert = logit_fn(features=features)
+                linear_logits_experts.append(linear_logits_expert)
+        linear_logits = tf.concat(linear_logits_experts, -1)
+        logits = tf.sigmoid(tf.matmul(dnn_logits + linear_logits, tf.to_float(gates)))
         if mode == tf.estimator.ModeKeys.PREDICT:
             spec = tf.estimator.EstimatorSpec(mode=mode,
                                           predictions=logits)
         else:
+            weights = tf.constant([[2], [1.5], [1], [0.5]])
             loss = -tf.reduce_sum(
                 tf.matmul(
                 tf.multiply(tf.to_float(labels), tf.log(logits+1e-8))
-                + tf.multiply(1.0 - tf.to_float(labels), tf.log(1.0 - logits+1e-8))), weights)
+                + tf.multiply(1.0 - tf.to_float(labels), tf.log(1.0 - logits+1e-8))
+                ,weights)
+            )
             optimizer = params['dnn_optimizer']
+
+            train_ops = list()
+            variables_list = tf.all_variables()
+            linear_optimizer = tf.train.FtrlOptimizer(0.005)
+            for scope in linear_scopes:
+                train_ops.append(linear_optimizer.minimize(
+                    loss,var_list=ops.get_collection(
+                        ops.GraphKeys.TRAINABLE_VARIABLES,
+                        scope=scope)))
+                for var in ops.get_collection(
+                    ops.GraphKeys.TRAINABLE_VARIABLES,
+                    scope=scope):
+                    variables_list.remove(var)
             train_op = optimizer.minimize(
-                loss=loss, global_step=tf.train.get_global_step())
+                loss, var_list=variables_list)
+            train_ops.append(train_op)
+            train_op = control_flow_ops.group(train_ops)
+            global_step = training_util.get_global_step()
+            with ops.control_dependencies([train_op]):
+                train_op = state_ops.assign_add(global_step, 1).op
+
             metrics = dict()
             spec = tf.estimator.EstimatorSpec(
                 mode=mode,
@@ -113,7 +155,6 @@ class MMOE(object):
                 train_op=train_op,
                 eval_metric_ops=metrics)
         return spec
-
 
 
     def df_to_dataset(self, df, stage, shuffle=True, batch_size=128, num_epochs=1):
@@ -147,14 +188,13 @@ class MMOE(object):
     def input_fn_predict(self, df, stage):
         return self.df_to_dataset(df, stage, shuffle=False, batch_size=len(df), num_epochs=1)
 
-    def train(self):
-
+    def train(self, num_epochs = 1):
         file_name = "{stage}_{action}_{day}_concate_sample.csv".format(stage=self.stage, action='all',
                                                                    day=STAGE_END_DAY[self.stage])
         stage_dir = os.path.join(FLAGS.root_path, self.stage, file_name)
         df = pd.read_csv(stage_dir)
         self.estimator.train(
-            input_fn=lambda: self.input_fn_train(df, self.stage, 1)
+            input_fn=lambda: self.input_fn_train(df, self.stage, num_epochs)
         )
     def evaluate(self):
         """
@@ -184,13 +224,13 @@ class MMOE(object):
         '''
         预测单个行为的发生概率
         '''
-        file_name = "{stage}_{action}_{day}_concate_sample.csv".format(stage=self.stage, action="all",
-                                                                       day=STAGE_END_DAY[self.stage])
-        submit_dir = os.path.join(FLAGS.root_path, self.stage, file_name)
+        file_name = "{stage}_{action}_{day}_concate_sample.csv".format(stage='submit', action="all",
+                                                                       day=STAGE_END_DAY['submit'])
+        submit_dir = os.path.join(FLAGS.root_path, 'submit', file_name)
         df = pd.read_csv(submit_dir)
         t = time.time()
         predicts = self.estimator.predict(
-            input_fn=lambda: self.input_fn_predict(df, self.stage)
+            input_fn=lambda: self.input_fn_predict(df, 'submit')
         )
         predicts_df = pd.DataFrame.from_dict(predicts)
         predict_dict = dict()
@@ -213,7 +253,6 @@ def del_file(path):
         else:
             print("del: ", c_path)
             os.remove(c_path)
-
 
 def get_feature_columns():
     '''
@@ -265,21 +304,23 @@ def main(argv):
 
     if stage in ["online_train", "offline_train"]:
         # 训练 并评估
-        model.train()
-        ids, logits, action_uauc = model.evaluate()
+        model.train(3)
+        ids, _, action_uauc = model.evaluate()
         eval_dict = action_uauc
+        if stage == 'online_train':
+            ids, logits, ts = model.predict()
+            predict_dict = logits
 
-    if stage == "evaluate":
+    elif stage == "evaluate":
         # 评估线下测试集结果，计算单个行为的uAUC值，并保存预测结果
-        ids, logits, action_uauc = model.evaluate()
+        ids, _, action_uauc = model.evaluate()
         eval_dict = action_uauc
-        predict_dict = logits
 
-    if stage == "submit":
+    elif stage == "submit":
         # 预测线上测试集结果，保存预测结果
         ids, logits, ts = model.predict()
         predict_time_cost = ts
-        predict_dict= logits
+        predict_dict = logits
 
     if stage in ["evaluate", "offline_train", "online_train"]:
         # 计算所有行为的加权uAUC
@@ -289,17 +330,17 @@ def main(argv):
         weight_auc = compute_weighted_score(eval_dict, weight_dict)
         print("Weighted uAUC: ", weight_auc)
 
-    if stage in ["evaluate", "submit"]:
+    # if stage in ["evaluate", "submit"]:
         # 保存所有行为的预测结果，生成submit文件
-        actions = pd.DataFrame.from_dict(predict_dict)
-        print("Actions:", actions)
-        ids[["userid", "feedid"]] = ids[["userid", "feedid"]].astype(int)
-        res = pd.concat([ids, actions], sort=False, axis=1)
-        # 写文件
-        file_name = "submit_" + str(int(time.time())) + ".csv"
-        submit_file = os.path.join(FLAGS.root_path, stage, file_name)
-        print('Save to: %s' % submit_file)
-        res.to_csv(submit_file, index=False)
+    actions = pd.DataFrame.from_dict(predict_dict)
+    print("Actions:", actions)
+    ids[["userid", "feedid"]] = ids[["userid", "feedid"]].astype(int)
+    res = pd.concat([ids, actions], sort=False, axis=1)
+    # 写文件
+    file_name = "submit_" + str(int(time.time())) + ".csv"
+    submit_file = os.path.join(FLAGS.root_path, stage, file_name)
+    print('Save to: %s' % submit_file)
+    res.to_csv(submit_file, index=False)
 
     if stage == "submit":
         print('不同目标行为2000条样本平均预测耗时（毫秒）：')
