@@ -21,10 +21,12 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('model_checkpoint_dir', './data/model', 'model dir')
 flags.DEFINE_string('root_path', '../data/', 'data dir')
-flags.DEFINE_integer('batch_size', 128, 'batch_size')
+flags.DEFINE_integer('batch_size', 256, 'batch_size')
 flags.DEFINE_integer('embed_dim', 10, 'embed_dim')
 flags.DEFINE_float('learning_rate', 0.1, 'learning_rate')
 flags.DEFINE_float('embed_l2', None, 'embedding l2 reg')
+flags.DEFINE_float('num_experts', 3, 'experts number')
+flags.DEFINE_float('num_epochs', 3, 'experts number')
 
 SEED = 2021
 
@@ -61,14 +63,14 @@ class MMOE(object):
             pass
         optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.learning_rate, beta1=0.9, beta2=0.999,
                                            epsilon=1)
-        config = tf.estimator.RunConfig(model_dir=model_checkpoint_stage_dir, tf_random_seed=SEED)
+        config = tf.estimator.RunConfig(model_dir=model_checkpoint_stage_dir, tf_random_seed=SEED, log_step_count_steps=300)
         self.estimator = tf.estimator.Estimator(model_fn=self.model_fn, params = {'model_dir': model_checkpoint_stage_dir,
                                                                 'linear_feature_columns': self.linear_feature_columns,
                                                                 'dnn_feature_columns': self.dnn_feature_columns,
                                                                 'dnn_hidden_units': [32, 8],
                                                                 'dnn_optimizer': optimizer,
                                                                  'actions': 4,
-                                                                 'experts':5},
+                                                                 'experts':FLAGS.num_experts},
                                                                 config = config)
 
     def model_fn(self,
@@ -88,15 +90,6 @@ class MMOE(object):
                 dnn_logits_expert = tf.layers.dense(dnn_net, 1, activation=None)
                 dnn_logits_experts.append(dnn_logits_expert)
             dnn_logits = tf.concat(dnn_logits_experts, -1)
-            # dnn_logit_fn = dnn.dnn_logit_fn_builder(
-            #     units=head.logits_dimension,
-            #     hidden_units=params['dnn_hidden_units'],
-            #     feature_columns=params['dnn_feature_columns'],
-            #     activation_fn=tf.nn.relu,
-            #     dropout=None,
-            #     batch_norm=False,
-            #     input_layer_partitioner=input_layer_partitioner)
-            # dnn_logits = dnn_logit_fn(features=features, mode=mode)
 
             gates = tf.Variable(np.zeros((params['experts'], params['actions'])),trainable=True)
             gates = tf.nn.softmax(gates, 0)
@@ -121,10 +114,10 @@ class MMOE(object):
         else:
             weights = tf.constant([[2], [1.5], [1], [0.5]])
             loss = -tf.reduce_sum(
-                tf.matmul(
+                # tf.matmul(
                 tf.multiply(tf.to_float(labels), tf.log(logits+1e-8))
                 + tf.multiply(1.0 - tf.to_float(labels), tf.log(1.0 - logits+1e-8))
-                ,weights)
+                # ,weights)
             )
             optimizer = params['dnn_optimizer']
 
@@ -196,18 +189,18 @@ class MMOE(object):
         self.estimator.train(
             input_fn=lambda: self.input_fn_train(df, self.stage, num_epochs)
         )
-    def evaluate(self):
+    def evaluate(self, stage = 'evaluate'):
         """
         评估单个行为的uAUC值
         """
         action = "all"
-        file_name = "{stage}_{action}_{day}_concate_sample.csv".format(stage=self.stage, action=action,
-                                                                       day=STAGE_END_DAY[self.stage])
-        evaluate_dir = os.path.join(FLAGS.root_path, self.stage, file_name)
+        file_name = "{stage}_{action}_{day}_concate_sample.csv".format(stage=stage, action=action,
+                                                                       day=STAGE_END_DAY[stage])
+        evaluate_dir = os.path.join(FLAGS.root_path, stage, file_name)
         df = pd.read_csv(evaluate_dir)
         userid_list = df['userid'].astype(str).tolist()
         predicts = self.estimator.predict(
-            input_fn=lambda: self.input_fn_predict(df, self.stage)
+            input_fn=lambda: self.input_fn_predict(df, stage)
         )
         predicts_df = pd.DataFrame.from_dict(predicts)
         score_dict = dict()
@@ -304,9 +297,19 @@ def main(argv):
 
     if stage in ["online_train", "offline_train"]:
         # 训练 并评估
-        model.train(3)
-        ids, _, action_uauc = model.evaluate()
-        eval_dict = action_uauc
+        for epoch_i in range(FLAGS.num_epochs):
+            model.train()
+            if stage == 'offline_train':
+                weight_dict = {"read_comment": 4, "like": 3, "click_avatar": 2, "favorite": 1, "forward": 1,
+                               "comment": 1, "follow": 1}
+                ids, _, action_uauc = model.evaluate(stage)
+                weight_auc = compute_weighted_score(action_uauc, weight_dict)
+                print("Weighted uAUC: ", weight_auc)
+                ids, _, action_uauc = model.evaluate()
+                eval_dict = action_uauc
+                weight_auc = compute_weighted_score(eval_dict, weight_dict)
+                print("Weighted uAUC: ", weight_auc)
+
         if stage == 'online_train':
             ids, logits, ts = model.predict()
             predict_dict = logits
