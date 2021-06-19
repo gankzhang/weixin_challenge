@@ -25,8 +25,8 @@ flags.DEFINE_integer('batch_size', 256, 'batch_size')
 flags.DEFINE_integer('embed_dim', 10, 'embed_dim')
 flags.DEFINE_float('learning_rate', 0.1, 'learning_rate')
 flags.DEFINE_float('embed_l2', None, 'embedding l2 reg')
-flags.DEFINE_float('num_experts', 3, 'experts number')
-flags.DEFINE_float('num_epochs', 3, 'experts number')
+flags.DEFINE_integer('num_experts', 5, 'experts number')
+flags.DEFINE_integer('num_epochs', 3, 'experts number')
 
 SEED = 2021
 
@@ -82,8 +82,9 @@ class MMOE(object):
         with tf.variable_scope('dnn') as scope:
             dnn_scope = scope.name
             dnn_logits_experts = list()
-            for action_i in range(params['experts']):
-                dnn_net = tf.feature_column.input_layer(features, params['dnn_feature_columns'])
+            dnn_embed = tf.feature_column.input_layer(features, params['dnn_feature_columns'])
+            for expert_i in range(params['experts']):
+                dnn_net = dnn_embed
                 #shape of dnn_net (50)
                 for unit in params['dnn_hidden_units']:
                     dnn_net = tf.layers.dense(dnn_net, units=unit, activation=tf.nn.relu)
@@ -91,8 +92,19 @@ class MMOE(object):
                 dnn_logits_experts.append(dnn_logits_expert)
             dnn_logits = tf.concat(dnn_logits_experts, -1)
 
-            gates = tf.Variable(np.zeros((params['experts'], params['actions'])),trainable=True)
-            gates = tf.nn.softmax(gates, 0)
+
+            Use_attention_gate = True
+            if Use_attention_gate:
+                gates_list = list()
+                for action_i in range(params['actions']):
+                    gates = tf.layers.dense(dnn_embed, params['experts'])
+                    gates = tf.expand_dims(gates,-1)
+                    gates_list.append(gates)
+                gates = tf.concat(gates_list, -1)
+                gates = tf.nn.softmax(gates, 1)
+            else:
+                gates = tf.Variable(np.zeros((params['experts'], params['actions'])),trainable=True)
+                gates = tf.nn.softmax(gates, 0)
 
         linear_logits_experts = list()
         linear_scopes = list()
@@ -106,8 +118,16 @@ class MMOE(object):
                     sparse_combiner='sum')
                 linear_logits_expert = logit_fn(features=features)
                 linear_logits_experts.append(linear_logits_expert)
+
+
         linear_logits = tf.concat(linear_logits_experts, -1)
-        logits = tf.sigmoid(tf.matmul(dnn_logits + linear_logits, tf.to_float(gates)))
+
+        if Use_attention_gate:
+            logits = tf.sigmoid(tf.matmul(tf.expand_dims(dnn_logits + linear_logits, 1), tf.to_float(gates)))
+            logits = tf.reduce_sum(logits, 1)
+        else:
+            logits = tf.sigmoid(tf.matmul(dnn_logits + linear_logits, tf.to_float(gates)))
+
         if mode == tf.estimator.ModeKeys.PREDICT:
             spec = tf.estimator.EstimatorSpec(mode=mode,
                                           predictions=logits)
@@ -134,7 +154,9 @@ class MMOE(object):
                     scope=scope):
                     variables_list.remove(var)
             train_op = optimizer.minimize(
-                loss, var_list=variables_list)
+                loss, var_list=ops.get_collection(
+                        ops.GraphKeys.TRAINABLE_VARIABLES,
+                        scope=dnn_scope))
             train_ops.append(train_op)
             train_op = control_flow_ops.group(train_ops)
             global_step = training_util.get_global_step()
@@ -298,17 +320,17 @@ def main(argv):
     if stage in ["online_train", "offline_train"]:
         # 训练 并评估
         for epoch_i in range(FLAGS.num_epochs):
-            model.train()
+            model.train(2)
             if stage == 'offline_train':
                 weight_dict = {"read_comment": 4, "like": 3, "click_avatar": 2, "favorite": 1, "forward": 1,
                                "comment": 1, "follow": 1}
                 ids, _, action_uauc = model.evaluate(stage)
                 weight_auc = compute_weighted_score(action_uauc, weight_dict)
-                print("Weighted uAUC: ", weight_auc)
+                print("Train Weighted uAUC: ", weight_auc)
                 ids, _, action_uauc = model.evaluate()
                 eval_dict = action_uauc
                 weight_auc = compute_weighted_score(eval_dict, weight_dict)
-                print("Weighted uAUC: ", weight_auc)
+                print("Evaluate Weighted uAUC: ", weight_auc)
 
         if stage == 'online_train':
             ids, logits, ts = model.predict()
