@@ -132,7 +132,7 @@ class MMOE(object):
             spec = tf.estimator.EstimatorSpec(mode=mode,
                                           predictions=logits)
         else:
-            weights = tf.constant([[2], [1.5], [1], [0.5]])
+            weights = tf.constant([[2], [1.5], [1], [1]])
             loss = -tf.reduce_sum(
                 # tf.matmul(
                 tf.multiply(tf.to_float(labels), tf.log(logits+1e-8))
@@ -192,7 +192,7 @@ class MMOE(object):
         else:
             ds = tf.data.Dataset.from_tensor_slices((dict(df)))
         if shuffle:
-            ds = ds.shuffle(buffer_size=len(df), seed=SEED)
+            ds = ds.shuffle(buffer_size=len(df)//2, seed=SEED)
         ds = ds.batch(batch_size)
         if stage in ["online_train", "offline_train"]:
             ds = ds.repeat(num_epochs)

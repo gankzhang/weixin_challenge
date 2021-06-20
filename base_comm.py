@@ -28,8 +28,7 @@ ACTION_LIST = ["read_comment", "like", "click_avatar",  "forward"]
 # 用于构造特征的字段列表
 FEA_COLUMN_LIST = ["read_comment", "like", "click_avatar",  "forward", "comment", "follow", "favorite"]
 # 每个行为的负样本下采样比例(下采样后负样本数/原负样本数)
-ACTION_SAMPLE_RATE = {"read_comment": 0.2, "like": 0.2, "click_avatar": 0.2, "forward": 0.1, "comment": 0.1, "follow": 0.1, "favorite": 0.1}
-# ACTION_SAMPLE_RATE = {"read_comment": 1, "like": 1, "click_avatar": 1, "forward": 1, "comment": 1, "follow": 1, "favorite": 1}
+ACTION_SAMPLE_RATE = {"read_comment": 0.2, "like": 0.2, "click_avatar": 0.1, "forward": 0.1, "comment": 0.05, "follow": 0.05, "favorite": 0.05}
 
 # 各个阶段数据集的设置的最后一天
 STAGE_END_DAY = {"online_train": 14, "offline_train": 12, "evaluate": 13, "submit": 15}
@@ -214,6 +213,9 @@ def concat_sample(sample_arr, stage="offline_train"):
     if stage in ['online_train', 'offline_train']:
         features += ACTION_LIST
         sample = sample_arr[0]
+        for action_i in range(1,len(ACTION_LIST)):
+            sample = pd.merge(sample, sample_arr[action_i], how='outer')
+        print(sample)
         sample = sample.join(feed_info, on="feedid", how="left", rsuffix="_feed")
         sample = sample.join(feed_date_feature, on=["feedid", "date_"], how="left", rsuffix="_feed")
         sample = sample.join(user_date_feature, on=["userid", "date_"], how="left", rsuffix="_user")
