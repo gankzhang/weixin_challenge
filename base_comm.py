@@ -28,12 +28,12 @@ ACTION_LIST = ["read_comment", "like", "click_avatar",  "forward"]
 # 用于构造特征的字段列表
 FEA_COLUMN_LIST = ["read_comment", "like", "click_avatar",  "forward", "comment", "follow", "favorite"]
 # 每个行为的负样本下采样比例(下采样后负样本数/原负样本数)
-ACTION_SAMPLE_RATE = {"read_comment": 0.2, "like": 0.2, "click_avatar": 0.1, "forward": 0.1, "comment": 0.05, "follow": 0.05, "favorite": 0.05}
+ACTION_SAMPLE_RATE = {"read_comment": 0.1, "like": 0.1, "click_avatar": 0.1, "forward": 0.1, "comment": 0.05, "follow": 0.05, "favorite": 0.05}
 
 # 各个阶段数据集的设置的最后一天
 STAGE_END_DAY = {"online_train": 14, "offline_train": 12, "evaluate": 13, "submit": 15}
 # 各个行为构造训练数据的天数
-ACTION_DAY_NUM = {"read_comment": 5, "like": 5, "click_avatar": 5, "forward": 5, "comment": 5, "follow": 5, "favorite": 5}
+ACTION_DAY_NUM = {"read_comment": 7, "like": 7, "click_avatar": 7, "forward": 7, "comment": 5, "follow": 5, "favorite": 5}
 
 
 def create_dir():

@@ -88,6 +88,7 @@ class MMOE(object):
                 #shape of dnn_net (50)
                 for unit in params['dnn_hidden_units']:
                     dnn_net = tf.layers.dense(dnn_net, units=unit, activation=tf.nn.relu)
+                    dnn_net = tf.layers.dropout(dnn_net, rate = 0.8)
                 dnn_logits_expert = tf.layers.dense(dnn_net, 1, activation=None)
                 dnn_logits_experts.append(dnn_logits_expert)
             dnn_logits = tf.concat(dnn_logits_experts, -1)
@@ -132,12 +133,12 @@ class MMOE(object):
             spec = tf.estimator.EstimatorSpec(mode=mode,
                                           predictions=logits)
         else:
-            weights = tf.constant([[2], [1.5], [1], [1]])
+            weights = tf.constant([[1.3], [1.1], [0.8], [0.8]])
             loss = -tf.reduce_sum(
-                # tf.matmul(
+                tf.matmul(
                 tf.multiply(tf.to_float(labels), tf.log(logits+1e-8))
                 + tf.multiply(1.0 - tf.to_float(labels), tf.log(1.0 - logits+1e-8))
-                # ,weights)
+                ,weights)
             )
             optimizer = params['dnn_optimizer']
 
