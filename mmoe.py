@@ -200,36 +200,11 @@ class MMOE(object):
         feed_embedding = new_feed_embedding
         self.feed_embedding = tf.convert_to_tensor(feed_embedding)
 
-        # def gen():
-        #     index = 0
-        #     while True:
-        #         data = df.iloc[index]
-        #         embedding = feed_embedding[int(data.feedid)]
-        #         data['feed_embedding'] = embedding
-        #         if stage != "submit":
-        #             label = data[ACTION_LIST]
-        #             yield (dict(data),dict(label))
-        #         else:
-        #             yield (dict(df))
-        #         index += 1
-        #         if index == len(df):
-        #             index = 0
-        # def _parse_funciton(index):
-        #     data = df.iloc[index]
-        #     embedding = feed_embedding[int(data.feedid)]
-        #     data['feed_embedding'] = embedding
-        #     if stage != "submit":
-        #         label = data[ACTION_LIST]
-        #         return {'feed_embedding':embedding}
-        #     else:
-        #         return (dict(df))
-
         if stage != "submit":
             label = df[ACTION_LIST]
             ds = tf.data.Dataset.from_tensor_slices((dict(df),dict(label)))
         else:
             ds = tf.data.Dataset.from_tensor_slices((dict(df)))
-            # ds = tf.data.Dataset.from_generator(gen, (dict))
         # if shuffle:
         #     ds = ds.shuffle(buffer_size=len(df), seed=SEED)
         ds = ds.batch(batch_size)
