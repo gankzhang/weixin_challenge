@@ -80,15 +80,17 @@ class MMOE(object):
                  params):
         # Use `input_layer` to apply the feature columns.
         with tf.variable_scope('dnn') as scope:
+            feed_embedding = tf.nn.embedding_lookup(self.feed_embedding, features['feedid'])
             dnn_scope = scope.name
             dnn_logits_experts = list()
             dnn_embed = tf.feature_column.input_layer(features, params['dnn_feature_columns'])
             for expert_i in range(params['experts']):
                 dnn_net = dnn_embed
+                dnn_embedding = tf.layers.dense(feed_embedding,32,activation=tf.nn.relu)
+                dnn_net = tf.concat([tf.to_float(dnn_embedding),dnn_net], -1)
                 #shape of dnn_net (50)
                 for unit in params['dnn_hidden_units']:
                     dnn_net = tf.layers.dense(dnn_net, units=unit, activation=tf.nn.relu)
-                    dnn_net = tf.layers.dropout(dnn_net, rate = 0.8)
                 dnn_logits_expert = tf.layers.dense(dnn_net, 1, activation=None)
                 dnn_logits_experts.append(dnn_logits_expert)
             dnn_logits = tf.concat(dnn_logits_experts, -1)
@@ -187,13 +189,49 @@ class MMOE(object):
         print(df.columns)
         print("batch_size: ", batch_size)
         print("num_epochs: ", num_epochs)
+        feed_embedding = pd.read_csv(os.path.join(FLAGS.root_path,'wechat_algo_data1', 'feed_embeddings.csv'))
+        feed_embedding = dict(feed_embedding)
+        new_feed_embedding = np.zeros((max(feed_embedding['feedid']), 512))
+        for id in range(len(feed_embedding)):
+            embedding = feed_embedding['feed_embedding'][id]
+            embedding = embedding.split(' ')
+            embedding = [float(x) for x in embedding[:512]]
+            new_feed_embedding[int(feed_embedding['feedid'][id])] = embedding
+        feed_embedding = new_feed_embedding
+        self.feed_embedding = tf.convert_to_tensor(feed_embedding)
+
+        # def gen():
+        #     index = 0
+        #     while True:
+        #         data = df.iloc[index]
+        #         embedding = feed_embedding[int(data.feedid)]
+        #         data['feed_embedding'] = embedding
+        #         if stage != "submit":
+        #             label = data[ACTION_LIST]
+        #             yield (dict(data),dict(label))
+        #         else:
+        #             yield (dict(df))
+        #         index += 1
+        #         if index == len(df):
+        #             index = 0
+        # def _parse_funciton(index):
+        #     data = df.iloc[index]
+        #     embedding = feed_embedding[int(data.feedid)]
+        #     data['feed_embedding'] = embedding
+        #     if stage != "submit":
+        #         label = data[ACTION_LIST]
+        #         return {'feed_embedding':embedding}
+        #     else:
+        #         return (dict(df))
+
         if stage != "submit":
             label = df[ACTION_LIST]
-            ds = tf.data.Dataset.from_tensor_slices((dict(df), label))
+            ds = tf.data.Dataset.from_tensor_slices((dict(df),dict(label)))
         else:
             ds = tf.data.Dataset.from_tensor_slices((dict(df)))
-        if shuffle:
-            ds = ds.shuffle(buffer_size=len(df)//2, seed=SEED)
+            # ds = tf.data.Dataset.from_generator(gen, (dict))
+        # if shuffle:
+        #     ds = ds.shuffle(buffer_size=len(df), seed=SEED)
         ds = ds.batch(batch_size)
         if stage in ["online_train", "offline_train"]:
             ds = ds.repeat(num_epochs)

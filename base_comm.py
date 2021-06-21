@@ -28,12 +28,12 @@ ACTION_LIST = ["read_comment", "like", "click_avatar",  "forward"]
 # 用于构造特征的字段列表
 FEA_COLUMN_LIST = ["read_comment", "like", "click_avatar",  "forward", "comment", "follow", "favorite"]
 # 每个行为的负样本下采样比例(下采样后负样本数/原负样本数)
-ACTION_SAMPLE_RATE = {"read_comment": 0.1, "like": 0.1, "click_avatar": 0.1, "forward": 0.1, "comment": 0.05, "follow": 0.05, "favorite": 0.05}
+ACTION_SAMPLE_RATE = {"read_comment": 0.05, "like": 0.05, "click_avatar": 0.05, "forward": 0.05, "comment": 0.05, "follow": 0.05, "favorite": 0.05}
 
 # 各个阶段数据集的设置的最后一天
 STAGE_END_DAY = {"online_train": 14, "offline_train": 12, "evaluate": 13, "submit": 15}
 # 各个行为构造训练数据的天数
-ACTION_DAY_NUM = {"read_comment": 7, "like": 7, "click_avatar": 7, "forward": 7, "comment": 5, "follow": 5, "favorite": 5}
+ACTION_DAY_NUM = {"read_comment": 10, "like": 10, "click_avatar": 10, "forward": 10, "comment": 5, "follow": 5, "favorite": 5}
 
 
 def create_dir():
@@ -216,6 +216,7 @@ def concat_sample(sample_arr, stage="offline_train"):
         for action_i in range(1,len(ACTION_LIST)):
             sample = pd.merge(sample, sample_arr[action_i], how='outer')
         print(sample)
+        print(features)
         sample = sample.join(feed_info, on="feedid", how="left", rsuffix="_feed")
         sample = sample.join(feed_date_feature, on=["feedid", "date_"], how="left", rsuffix="_feed")
         sample = sample.join(user_date_feature, on=["userid", "date_"], how="left", rsuffix="_user")
@@ -225,8 +226,8 @@ def concat_sample(sample_arr, stage="offline_train"):
         sample[user_feature_col] = sample[user_feature_col].fillna(0.0)
         sample[feed_feature_col] = np.log(sample[feed_feature_col] + 1.0)
         sample[user_feature_col] = np.log(sample[user_feature_col] + 1.0)
-        features += feed_feature_col
-        features += user_feature_col
+        # features += feed_feature_col
+        # features += user_feature_col
 
         sample[["authorid", "bgm_song_id", "bgm_singer_id"]] += 1  # 0 用于填未知
         sample[["authorid", "bgm_song_id", "bgm_singer_id", "videoplayseconds"]] = \
