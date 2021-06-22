@@ -27,6 +27,7 @@ flags.DEFINE_float('learning_rate', 0.1, 'learning_rate')
 flags.DEFINE_float('embed_l2', None, 'embedding l2 reg')
 flags.DEFINE_integer('num_experts', 5, 'experts number')
 flags.DEFINE_integer('num_epochs', 3, 'experts number')
+flags.DEFINE_integer('use_feed_embedding', 0, 'if use feed embedding')
 
 SEED = 2021
 
@@ -80,17 +81,19 @@ class MMOE(object):
                  params):
         # Use `input_layer` to apply the feature columns.
         with tf.variable_scope('dnn') as scope:
-            feed_embedding = tf.nn.embedding_lookup(self.feed_embedding, features['feedid'])
+            if FLAGS.use_feed_embedding:
+                feed_embedding = tf.nn.embedding_lookup(self.feed_embedding, features['feedid'])
             dnn_scope = scope.name
             dnn_logits_experts = list()
             dnn_embed = tf.feature_column.input_layer(features, params['dnn_feature_columns'])
             for expert_i in range(params['experts']):
                 dnn_net = dnn_embed
-                dnn_embedding = tf.layers.dense(feed_embedding, 32, activation=tf.nn.relu)
-                dnn_net = tf.concat([tf.to_float(dnn_embedding),dnn_net], -1)
                 #shape of dnn_net (50)
                 for unit in params['dnn_hidden_units']:
                     dnn_net = tf.layers.dense(dnn_net, units=unit, activation=tf.nn.relu)
+                if FLAGS.use_feed_embedding:
+                    dnn_embedding = tf.layers.dense(feed_embedding, 8, activation=tf.nn.relu)
+                    dnn_net = tf.concat([tf.to_float(dnn_embedding),dnn_net], -1)
                 dnn_logits_expert = tf.layers.dense(dnn_net, 1, activation=None)
                 dnn_logits_experts.append(dnn_logits_expert)
             dnn_logits = tf.concat(dnn_logits_experts, -1)
@@ -187,16 +190,17 @@ class MMOE(object):
         print(df.columns)
         print("batch_size: ", batch_size)
         print("num_epochs: ", num_epochs)
-        feed_embedding = pd.read_csv(os.path.join(FLAGS.root_path,'wechat_algo_data1', 'feed_embeddings.csv'))
-        feed_embedding = dict(feed_embedding)
-        new_feed_embedding = np.zeros((max(feed_embedding['feedid'])+1, 512))
-        for id in range(len(feed_embedding)):
-            embedding = feed_embedding['feed_embedding'][id]
-            embedding = embedding.split(' ')
-            embedding = [float(x) for x in embedding[:512]]
-            new_feed_embedding[int(feed_embedding['feedid'][id])] = embedding
-        feed_embedding = new_feed_embedding
-        self.feed_embedding = tf.convert_to_tensor(feed_embedding)
+        if FLAGS.use_feed_embedding:
+            feed_embedding = pd.read_csv(os.path.join(FLAGS.root_path,'wechat_algo_data1', 'feed_embeddings.csv'))
+            feed_embedding = dict(feed_embedding)
+            new_feed_embedding = np.zeros((max(feed_embedding['feedid'])+1, 512))
+            for id in range(len(feed_embedding)):
+                embedding = feed_embedding['feed_embedding'][id]
+                embedding = embedding.split(' ')
+                embedding = [float(x) for x in embedding[:512]]
+                new_feed_embedding[int(feed_embedding['feedid'][id])] = embedding
+            feed_embedding = new_feed_embedding
+            self.feed_embedding = tf.convert_to_tensor(feed_embedding)
 
         if stage != "submit":
             label = df[ACTION_LIST]
@@ -206,6 +210,7 @@ class MMOE(object):
         if shuffle:
             ds = ds.shuffle(buffer_size=len(df), seed=SEED)
         ds = ds.batch(batch_size)
+        ds = ds.prefetch(buffer_size=batch_size * 10)
         if stage in ["online_train", "offline_train"]:
             ds = ds.repeat(num_epochs)
         return ds
@@ -332,7 +337,7 @@ def main(argv):
     if stage in ["online_train", "offline_train"]:
         # 训练 并评估
         for epoch_i in range(FLAGS.num_epochs):
-            model.train(2)
+            model.train(1)
             if stage == 'offline_train':
                 weight_dict = {"read_comment": 4, "like": 3, "click_avatar": 2, "favorite": 1, "forward": 1,
                                "comment": 1, "follow": 1}
