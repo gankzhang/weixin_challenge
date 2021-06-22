@@ -86,7 +86,7 @@ class MMOE(object):
             dnn_embed = tf.feature_column.input_layer(features, params['dnn_feature_columns'])
             for expert_i in range(params['experts']):
                 dnn_net = dnn_embed
-                dnn_embedding = tf.layers.dense(feed_embedding,32,activation=tf.nn.relu)
+                dnn_embedding = tf.layers.dense(feed_embedding, 32, activation=tf.nn.relu)
                 dnn_net = tf.concat([tf.to_float(dnn_embedding),dnn_net], -1)
                 #shape of dnn_net (50)
                 for unit in params['dnn_hidden_units']:
@@ -94,7 +94,6 @@ class MMOE(object):
                 dnn_logits_expert = tf.layers.dense(dnn_net, 1, activation=None)
                 dnn_logits_experts.append(dnn_logits_expert)
             dnn_logits = tf.concat(dnn_logits_experts, -1)
-
 
             Use_attention_gate = True
             if Use_attention_gate:
@@ -121,7 +120,6 @@ class MMOE(object):
                     sparse_combiner='sum')
                 linear_logits_expert = logit_fn(features=features)
                 linear_logits_experts.append(linear_logits_expert)
-
 
         linear_logits = tf.concat(linear_logits_experts, -1)
 
@@ -191,7 +189,7 @@ class MMOE(object):
         print("num_epochs: ", num_epochs)
         feed_embedding = pd.read_csv(os.path.join(FLAGS.root_path,'wechat_algo_data1', 'feed_embeddings.csv'))
         feed_embedding = dict(feed_embedding)
-        new_feed_embedding = np.zeros((max(feed_embedding['feedid']), 512))
+        new_feed_embedding = np.zeros((max(feed_embedding['feedid'])+1, 512))
         for id in range(len(feed_embedding)):
             embedding = feed_embedding['feed_embedding'][id]
             embedding = embedding.split(' ')
@@ -202,11 +200,11 @@ class MMOE(object):
 
         if stage != "submit":
             label = df[ACTION_LIST]
-            ds = tf.data.Dataset.from_tensor_slices((dict(df),dict(label)))
+            ds = tf.data.Dataset.from_tensor_slices((dict(df), label))
         else:
             ds = tf.data.Dataset.from_tensor_slices((dict(df)))
-        # if shuffle:
-        #     ds = ds.shuffle(buffer_size=len(df), seed=SEED)
+        if shuffle:
+            ds = ds.shuffle(buffer_size=len(df), seed=SEED)
         ds = ds.batch(batch_size)
         if stage in ["online_train", "offline_train"]:
             ds = ds.repeat(num_epochs)
@@ -215,7 +213,7 @@ class MMOE(object):
         return self.df_to_dataset(df, stage, shuffle=True, batch_size=FLAGS.batch_size,
                                   num_epochs=num_epochs)
     def input_fn_predict(self, df, stage):
-        return self.df_to_dataset(df, stage, shuffle=False, batch_size=len(df), num_epochs=1)
+        return self.df_to_dataset(df, stage, shuffle=False, batch_size=FLAGS.batch_size, num_epochs=1)
 
     def train(self, num_epochs = 1):
         file_name = "{stage}_{action}_{day}_concate_sample.csv".format(stage=self.stage, action='all',
